@@ -91,9 +91,9 @@ Parameters:
     Type: String
     Default: 1.24
   WorkerNodeInstanceType:
-    Description: Enter EC2 Instance Type. Default is t3.xlarge.
+    Description: Enter EC2 Instance Type. Default is t3.medium.
     Type: String
-    Default: t3.xlarge
+    Default: t3.medium
   WorkerNodeCount:
     Description: Worker Node Counts
     Type: String
@@ -285,49 +285,6 @@ Resources:
       SubnetId: !Ref PrivateSubnet3
       RouteTableId: !Ref PrivateSubnetRouteTable
 
-# EFS
-  EFSSG:
-    Type: AWS::EC2::SecurityGroup
-    Properties:
-      VpcId: !Ref EksVPC
-      GroupDescription: EFS Security Group
-      Tags:
-      - Key : Name
-        Value : !Sub ${ClusterBaseName}-EFS
-      SecurityGroupIngress:
-      - IpProtocol: tcp
-        FromPort: '2049'
-        ToPort: '2049'
-        CidrIp: !Ref VpcBlock
-
-  ElasticFileSystem:
-    Type: AWS::EFS::FileSystem
-    Properties:
-      FileSystemTags:
-        - Key: Name
-          Value: !Sub ${ClusterBaseName}-EFS
-  ElasticFileSystemMountTarget0:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref ElasticFileSystem
-      SecurityGroups:
-      - !Ref EFSSG
-      SubnetId: !Ref PublicSubnet1
-  ElasticFileSystemMountTarget1:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref ElasticFileSystem
-      SecurityGroups:
-      - !Ref EFSSG
-      SubnetId: !Ref PublicSubnet2
-  ElasticFileSystemMountTarget2:
-    Type: AWS::EFS::MountTarget
-    Properties:
-      FileSystemId: !Ref ElasticFileSystem
-      SecurityGroups:
-      - !Ref EFSSG
-      SubnetId: !Ref PublicSubnet3
-
 # NAT Gateway
   MYVPCEIP:
     Type: AWS::EC2::EIP
@@ -374,7 +331,7 @@ Resources:
       KeyName: !Ref KeyName
       Tags:
         - Key: Name
-          Value: !Sub ${ClusterBaseName}-bastion-EC2
+          Value: !Sub ${ClusterBaseName}-bastion
       NetworkInterfaces:
         - DeviceIndex: 0
           SubnetId: !Ref PublicSubnet1
@@ -392,7 +349,7 @@ Resources:
         Fn::Base64:
           !Sub |
             #!/bin/bash
-            hostnamectl --static set-hostname "${ClusterBaseName}-bastion-EC2"
+            hostnamectl --static set-hostname "${ClusterBaseName}-bastion"
 
             # Config convenience
             echo 'alias vi=vim' >> /etc/profile
@@ -404,11 +361,10 @@ Resources:
 
             # Install Packages
             cd /root
-            yum -y install tree jq git htop lynx amazon-efs-utils
+            yum -y install tree jq git htop # lynx amazon-efs-utils
 
             # Install kubectl & helm
-            #curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.26.2/2023-03-17/bin/linux/amd64/kubectl
-            curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.25.7/2023-03-17/bin/linux/amd64/kubectl
+            curl -O https://s3.us-west-2.amazonaws.com/amazon-eks/1.27.1/2023-04-19/bin/linux/amd64/kubectl
             install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
             curl -s https://raw.githubusercontent.com/helm/helm/master/scripts/get-helm-3 | bash
 
@@ -438,7 +394,7 @@ Resources:
             echo 'export PATH="$PATH:/root/.krew/bin"' >> /etc/profile
 
             # Install krew plugin
-            kubectl krew install ctx ns get-all df-pv # ktop mtail tree
+            kubectl krew install ctx ns get-all df-pv neat # ktop mtail tree
 
             # Install kube-ps1
             echo 'source <(kubectl completion bash)' >> /etc/profile
@@ -460,10 +416,6 @@ Resources:
             # Install Docker
             amazon-linux-extras install docker -y
             systemctl start docker && systemctl enable docker
-
-            # Setting EFS Filesystem
-            mkdir -p /mnt/myefs
-            echo "export EfsFsId=${ElasticFileSystem}" >> /etc/profile
 
             # Create SSH Keypair
             ssh-keygen -t rsa -N "" -f /root/.ssh/id_rsa
@@ -504,11 +456,10 @@ Resources:
             echo "export PrivateSubnet3=$PrivateSubnet3" >> /etc/profile
 
             # Create EKS Cluster & Nodegroup 
-            eksctl create cluster --name $CLUSTER_NAME --region=$AWS_DEFAULT_REGION --nodegroup-name=ng1 --node-type=${WorkerNodeInstanceType} --nodes ${WorkerNodeCount} --node-volume-size=${WorkerNodeVolumesize} --vpc-public-subnets "$PubSubnet1","$PubSubnet2","$PubSubnet3" --version ${KubernetesVersion} --max-pods-per-node 50 --ssh-access --ssh-public-key /root/.ssh/id_rsa.pub --with-oidc --external-dns-access --full-ecr-access --dry-run > myeks.yaml
+            eksctl create cluster --name $CLUSTER_NAME --region=$AWS_DEFAULT_REGION --nodegroup-name=ng1 --node-type=${WorkerNodeInstanceType} --nodes ${WorkerNodeCount} --node-volume-size=${WorkerNodeVolumesize} --vpc-public-subnets "$PubSubnet1","$PubSubnet2","$PubSubnet3" --version ${KubernetesVersion} --max-pods-per-node 50 --ssh-access --ssh-public-key /root/.ssh/id_rsa.pub --with-oidc --external-dns-access --full-ecr-access --asg-access --dry-run > myeks.yaml
             sed -i 's/certManager: false/certManager: true/g' myeks.yaml
-            sed -i 's/ebs: false/ebs: true/g' myeks.yaml
+            #sed -i 's/ebs: false/ebs: true/g' myeks.yaml
             sed -i 's/cloudWatch: false/cloudWatch: true/g' myeks.yaml
-            sed -i 's/xRay: false/xRay: true/g' myeks.yaml
             cat <<EOT >> myeks.yaml
             addons:
             - name: vpc-cni # no version is specified so it deploys the default version
@@ -530,16 +481,11 @@ Resources:
                   namespace: kube-system
                 wellKnownPolicies:
                   awsLoadBalancerController: true
-              - metadata:
-                  name: efs-csi-controller-sa
-                  namespace: kube-system
-                wellKnownPolicies:
-                  efsCSIController: true
             EOT
             sed -i -n -e '/withOIDC/r irsa.yaml' -e '1,$p' myeks.yaml
             cat <<EOT > precmd.yaml
               preBootstrapCommands:
-                - "yum install links tree jq tcpdump sysstat -y"
+                - "yum install nvme-cli links tree jq tcpdump sysstat -y"
             EOT
             sed -i -n -e '/instanceType/r precmd.yaml' -e '1,$p' myeks.yaml
             nohup eksctl create cluster -f myeks.yaml --verbose 4 --kubeconfig "/root/.kube/config" 1> /root/create-eks.log 2>&1 &
